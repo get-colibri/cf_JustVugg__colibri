@@ -9,6 +9,7 @@ RAM, and storage as one managed memory hierarchy. Insufficient fast memory may
 reduce speed, but the default policy never silently changes model precision or
 router semantics.
 
+
 ```
 $ ./coli chat
   🐦 colibrì v1.0 — GLM-5.2 · 744B MoE · int4 · streaming CPU
@@ -16,7 +17,6 @@ $ ./coli chat
   › ciao!
   ◆ Ciao! 😊 Come posso aiutarti oggi?
 ```
-
 
 ## See it running
 
@@ -54,7 +54,7 @@ The engine is a single C file (`c/glm.c`) plus small headers. No BLAS, no Python
 
 ## What's implemented
 
-- **Faithful GLM-5.2 (`glm_moe_dsa`) forward** — validated token-exact against a `transformers` oracle (teacher-forcing 32/32, greedy 20/20 on a tiny-random model with the real architecture).
+- **Faithful GLM-5.2 (**`glm_moe_dsa`**) forward** — validated token-exact against a `transformers` oracle (teacher-forcing 32/32, greedy 20/20 on a tiny-random model with the real architecture).
 - **MLA attention** (q/kv-LoRA, interleaved partial RoPE) with **compressed KV-cache**: 576 floats/token instead of 32,768 (57× smaller — GLM-5.2 has 64 heads and no GQA).
 - **DeepSeek-V3-style sigmoid router** (noaux_tc, routed_scaling_factor), shared expert, first-3-dense layers.
 - **Native MTP speculative decoding** — GLM-5.2's own multi-token-prediction head (layer 78) drafts tokens that the main model verifies in one batched forward. **The head must be int8** (the converter does this by default): at int4 draft acceptance collapses to 0–4% and speculation never engages; at int8 it's 39–59% acceptance, **2.2–2.8 tokens/forward** (community-measured, [#8](https://github.com/JustVugg/colibri/issues/8)). Lossless *in exact arithmetic* — but **not byte-identical to non-speculative greedy in practice** ([#100](https://github.com/JustVugg/colibri/issues/100)). This isn't MTP-specific: colibrì's quantized integer kernels are shape-dependent, so any batched (S>1) or GPU forward rounds slightly differently from the single-token path, and int4 GLM-5.2 sits close enough to argmax ties that such a rounding change can flip a token. MTP, the CUDA expert tier, and batched prefill are three different ways to trip the same sensitivity (community-confirmed in #100: swapping only the kernel family forks greedy output on 3/5 prompts, with **zero speculation**). Every emitted token is still the argmax of a *valid* forward — the continuation stays correct — it just isn't the same stream. For byte-exact reproducibility: `DRAFT=0` (no speculation), plus `IDOT=0 COLI_CUDA=0` if you also want kernel-family/GPU independence. Under sampling, rejection sampling keeps the distribution correct. Honest caveat from the same measurement: on a **cold** cache each verified draft routes to extra experts (~660 → ~1100 expert-loads/token), so speculation can be a net *time* loss until the cache/pin warms up.
@@ -76,34 +76,34 @@ The engine is a single C file (`c/glm.c`) plus small headers. No BLAS, no Python
 
 Detailed GPU experiment: [GLM-5.2 on 6x RTX 5090](docs/experiments/glm52-6x5090-2026-07-12.md) — full expert residency across VRAM+RAM reaches 6.84 tok/s single-request decode.
 
-| metric | value |
-|---|---|
-| model on disk (int4 container) | ~370 GB |
-| resident RAM (dense, int4) | 9.9 GB |
-| load time | ~30 s |
-| peak RSS during chat | ~20 GB (auto-capped) |
-| cold decode cost | ~11 GB disk reads/token (75 layers × 8 experts) |
-| disk ceiling (this dev box's drive) | ~1 GB/s → ~0.05–0.1 tok/s cold |
-| MTP speculation (int8 head) | 2.2–2.8 tok/forward measured ([#8](https://github.com/JustVugg/colibri/issues/8)) |
+| metric                              | value                                                                             |
+| ----------------------------------- | --------------------------------------------------------------------------------- |
+| model on disk (int4 container)      | ~370 GB                                                                           |
+| resident RAM (dense, int4)          | 9.9 GB                                                                            |
+| load time                           | ~30 s                                                                             |
+| peak RSS during chat                | ~20 GB (auto-capped)                                                              |
+| cold decode cost                    | ~11 GB disk reads/token (75 layers × 8 experts)                                   |
+| disk ceiling (this dev box's drive) | ~1 GB/s → ~0.05–0.1 tok/s cold                                                    |
+| MTP speculation (int8 head)         | 2.2–2.8 tok/forward measured ([#8](https://github.com/JustVugg/colibri/issues/8)) |
 
 This is not fast. It is a 744B frontier-class model **answering correctly on a machine that costs less than one H100 fan**. Warm cache, pinned hot experts and MTP push the useful-response latency down considerably; the physics of the disk does the rest.
 
 ### SSD note
+
 Cold starts are heavy on random reads (~11 GB/token), but reads don't meaningfully wear an SSD — colibrì's streaming is read-only. The real concerns under heavy use are (1) **swap traffic** if the system runs out of RAM (writes do wear the drive — keep a sane `--ram` budget; colibrì's auto-budget is designed to stay clear of swap) and (2) **sustained thermals**: hours at full read duty cycle will heat cheaper drives. Monitor drive temperature and health.
 
 ## Download the model
 
 A pre-converted **GLM-5.2 int4** model for colibrì is available on Hugging Face — **use the version with the int8 MTP heads** (matey-0's clone):
 
-**https://huggingface.co/mateogrgic/GLM-5.2-colibri-int4-with-int8-mtp**
+**[https://huggingface.co/mateogrgic/GLM-5.2-colibri-int4-with-int8-mtp](https://huggingface.co/mateogrgic/GLM-5.2-colibri-int4-with-int8-mtp)**
 
-> ⚠️ **The MTP head must be int8.** The original mirror ([jlnsrk/GLM-5.2-colibri-int4](https://huggingface.co/jlnsrk/GLM-5.2-colibri-int4)) ships **int4** MTP heads, which give **0% draft acceptance** — speculation silently never engages and you lose the ~2× MTP lever. This is the single most common "why is MTP stuck at 0%?" report ([#8](https://github.com/JustVugg/colibri/issues/8), [#102](https://github.com/JustVugg/colibri/issues/102)). The int8 head gives the measured **39–59% acceptance**. matey-0's clone above is the original int4 model with the three `out-mtp-*` files already swapped to int8 — download that one and you're done.
->
-> Check what you have: `ls -l <model>/out-mtp-*`
-> · **int8 (correct):** `3527131672 / 5366238584 / 1065950496`
-> · **int4 (0% acceptance):** `1765523544 / 2686077736 / 536747200` — if you see these, replace just those three files from the int8 mirror.
+> ⚠️ **The MTP head must be int8.** The original mirror ([jlnsrk/GLM-5.2-colibri-int4](https://huggingface.co/jlnsrk/GLM-5.2-colibri-int4)) ships **int4** MTP heads, which give **0% draft acceptance** — speculation silently never engages and you lose the ~2× MTP lever. This is the single most common "why is MTP stuck at 0%?" report ([#8](https://github.com/JustVugg/colibri/issues/8), [#102](https://github.com/JustVugg/colibri/issues/102)). The int8 head gives the measured **39–59% acceptance**. matey-0's clone above is the original int4 model with the three `out-mtp-*` files already swapped to int8 — download that one and you're done.Check what you have: `ls -l <model>/out-mtp-*`
+· **int8 (correct):** `3527131672 / 5366238584 / 1065950496`
+· **int4 (0% acceptance):** `1765523544 / 2686077736 / 536747200` — if you see these, replace just those three files from the int8 mirror.
 
 Download the repository and point `COLI_MODEL` to its directory:
+
 
 ```bash
 COLI_MODEL=/path/to/GLM-5.2-colibri-int4-with-int8-mtp ./coli chat
@@ -112,6 +112,7 @@ COLI_MODEL=/path/to/GLM-5.2-colibri-int4-with-int8-mtp ./coli chat
 This skips the FP8 → int4 conversion step entirely. Thanks to DatPat for the original mirror and matey-0 for the int8-head clone.
 
 ### Quick start
+
 
 ```bash
 cd c
@@ -128,6 +129,7 @@ COLI_MODEL=/nvme/glm52_i4 ./coli chat
 ```
 
 Inspect the planned storage hierarchy before loading the model:
+
 
 ```bash
 COLI_MODEL=/nvme/glm52_i4 ./coli plan
@@ -148,6 +150,7 @@ variables keep precedence over automatic values.
 
 Before loading the model, `coli doctor` performs a read-only readiness check and
 explains whether the selected Disk/RAM/VRAM placement is runnable:
+
 
 ```bash
 COLI_MODEL=/nvme/glm52_i4 ./coli doctor
@@ -173,6 +176,7 @@ engine source is unchanged.
 
 **Toolchain:** GCC via [winlibs](https://winlibs.com/) or MSYS2 MinGW-w64. Tested with
 GCC 16.1.0 (x86_64-ucrt-posix-seh).
+
 
 ```powershell
 # One-time toolchain install (pick one):
@@ -209,6 +213,7 @@ diverse prompts to build the `.coli_usage` histogram unattended, so the next
 real session starts with a large, accurate hot-expert pin. Each run saves usage
 atomically on clean completion.
 
+
 ```powershell
 .\warmup.ps1 -Rounds 1 -Ngen 32               # ~60-90 min, durable progress
 ```
@@ -219,6 +224,7 @@ CUDA backend into a standalone `coli_cuda.dll` (nvcc + MSVC), then the host
 `glm.exe` loads it at runtime via `LoadLibrary` (`c/backend_loader.c`). The host
 never links cudart directly; if the DLL is absent the engine falls back to CPU
 without error.
+
 
 ```powershell
 # Prerequisites: CUDA Toolkit + MSVC Build Tools (cl.exe) + nvcc on PATH.
@@ -252,6 +258,7 @@ validation against the transformers oracle remain separate workstreams.
 `coli serve` keeps one model process loaded and exposes a text-only OpenAI-compatible
 HTTP API. The gateway uses only the Python standard library; inference still runs in
 the same dependency-free C engine.
+
 
 ```bash
 cd c
@@ -300,6 +307,7 @@ generation responses include `x-colibri-queue-wait-ms`.
 select one with the optional integer `cache_slot` field; ordinary OpenAI clients omit
 it and keep the original slot 0 behavior.
 
+
 ```json
 {
   "model": "glm-5.2-colibri",
@@ -322,6 +330,7 @@ PCIe copy tax that keeps CUDA's streaming experts on the CPU — so colibrì has
 opt-in Metal backend that runs the **routed-expert SwiGLU (batched, zero-copy from
 the RAM slabs)**, the **fused decode attention** (full MLA layer in one command
 buffer, S≤4), and **prefill's large GEMMs** on the GPU. Token-exact vs the CPU path.
+
 
 ```bash
 cd c
@@ -347,6 +356,7 @@ experts deliberately remain on the original CPU path for now: copying an expert
 from NVMe to the GPU on every use would only replace the disk bottleneck with a
 PCIe bottleneck. Resident quantized tensors are uploaded lazily once and reused.
 
+
 ```bash
 cd c
 make cuda-test CUDA=1                  # q8/q4/q2/f32 kernel correctness
@@ -371,6 +381,7 @@ expert tier. Treat this as an opt-in until the projected dense set and the 2 GB
 per-device runtime reserve fit the target GPUs.
 A measured `PIN` profile can promote its hottest experts into the persistent
 VRAM tier while keeping the rest in RAM:
+
 
 ```bash
 STATS=stats.txt SNAP=/nvme/glm52_i4 ./glm 64 4 4   # collect routing frequencies first
@@ -443,6 +454,7 @@ cuBLAS/Tensor Core kernels.
 For a reproducible backend A/B without the full checkpoint, generate the
 deterministic 313M-parameter `glm_moe_dsa` fixture and run fixed-token replay:
 
+
 ```bash
 cd c
 python tools/make_glm_bench_model.py --output /nvme/colibri-bench-medium --device cuda
@@ -457,6 +469,7 @@ CUDA, CPU hot-store, and CUDA hot-expert execution with identical replay tokens.
 
 `web/` contains a community-contributed browser UI (React + TypeScript, a pure
 API client — it never touches the engine directly):
+
 
 ```bash
 cd web
@@ -481,6 +494,7 @@ explicit lossy overrides print a warning and proceed.
 Auto-tier plans size OpenMP from physical cores and bind workers across cores.
 Memory-bound quantized kernels can regress sharply when SMT siblings compete
 for limited memory channels; explicit `OMP_*` settings always take precedence.
+
 
 ```bash
 coli plan --model /models/glm52_i4 --policy quality
@@ -531,6 +545,7 @@ thrashing. Persistent `.coli_usage` remains the long-term signal and is not deca
 
 One command serves the OpenAI-compatible API **and** the web console on the same port, then opens your browser when the engine is ready:
 
+
 ```bash
 cd web && npm install && npm run build   # once
 ./coli web --model <model-dir>
@@ -549,6 +564,7 @@ The dashboard talks to the engine over two tiny protocol lines (`TIERS`, `EMAP`/
 colibrì was built on deliberately humble hardware (12 cores, 25 GB RAM, an older DRAM-less NVMe behind a WSL2 VHDX that measured ~1 GB/s random on *this* drive — note WSL2 VHDX is not inherently slow: a community 5090 box measured 10.5 GB/s O_DIRECT through one, [#101](https://github.com/JustVugg/colibri/issues/101)). **Every one of those constraints is a knob your machine can turn up.** The engine needs: Linux (or WSL2), macOS, or **Windows 11 natively (MinGW-w64)**; gcc with OpenMP, AVX2, ≥16 GB RAM, and the ~370 GB int4 model on a local NVMe (ext4/NTFS — never a network/9p mount).
 
 **How to test it, in order:**
+
 
 ```bash
 cd c && ./setup.sh                 # build + architecture self-test (expects 32/32)
@@ -577,13 +593,13 @@ PIN=stats.txt PIN_GB=20 ./coli chat        # scale PIN_GB to your free RAM
 
 **Back-of-envelope predictions** (decode is disk-bound: a cold token costs ~11.4 GB of expert reads; MTP speculation roughly halves the effective cost *once the cache is warm*; RAM turns cold reads into free cache hits):
 
-| machine | expected |
-|---|---|
-| this dev box (WSL2 VHDX, ~1 GB/s, 25 GB RAM) | ~0.05–0.1 tok/s cold — proven baseline |
-| native Linux, PCIe4 NVMe (~3–5 GB/s random), 32 GB | ~0.5–1 tok/s |
-| PCIe5 NVMe or 2×NVMe RAID0 (~8–12 GB/s), 64 GB (PIN ~40 GB of hot experts) | ~2–4 tok/s |
-| 128–256 GB RAM, 12 cores (hot experts cached) | ~2–4 tok/s — matmul-bound: ~80 GFLOP/token vs ~250 GFLOP/s of our AVX2 kernels |
-| same RAM + 24–32 cores, or AVX-512/VNNI kernels | ~5–15 tok/s — interactive; kernel work is the multiplier |
+| machine                                                                    | expected                                                                       |
+| -------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| this dev box (WSL2 VHDX, ~1 GB/s, 25 GB RAM)                               | ~0.05–0.1 tok/s cold — proven baseline                                         |
+| native Linux, PCIe4 NVMe (~3–5 GB/s random), 32 GB                         | ~0.5–1 tok/s                                                                   |
+| PCIe5 NVMe or 2×NVMe RAID0 (~8–12 GB/s), 64 GB (PIN ~40 GB of hot experts) | ~2–4 tok/s                                                                     |
+| 128–256 GB RAM, 12 cores (hot experts cached)                              | ~2–4 tok/s — matmul-bound: ~80 GFLOP/token vs ~250 GFLOP/s of our AVX2 kernels |
+| same RAM + 24–32 cores, or AVX-512/VNNI kernels                            | ~5–15 tok/s — interactive; kernel work is the multiplier                       |
 
 These are estimates, not measurements — if you run colibrì on serious hardware, **please open an issue with your numbers**: real datapoints from better machines are exactly what this project needs next.
 
@@ -591,27 +607,27 @@ These are estimates, not measurements — if you run colibrì on serious hardwar
 
 Real numbers from real machines, stock build (`setup.sh`, gcc 13), greedy decoding, `--ngen 32`, MTP active:
 
-| machine | disk (iobench, 19 MB × 64, 8 threads) | config | measured |
-|---|---|---|---|
-| Intel Core Ultra 7 270K Plus (24 threads) · WSL2 · 24 GB RAM · NVMe VHDX ([#2](https://github.com/JustVugg/colibri/issues/2)) | 1.96 GB/s buffered · 2.74 GB/s O_DIRECT | default | 0.07 tok/s · expert hit 3–4% · RSS 14.1 GB |
-| 〃 | 〃 | `--topp 0.7` | **0.11 tok/s** · expert hit 11% · RSS 14.7 GB |
-| Apple M5 Max (18 cores) · macOS · 128 GB unified · internal SSD ([#4](https://github.com/JustVugg/colibri/issues/4), [#5](https://github.com/JustVugg/colibri/issues/5)) | ~4 GB/s cold (the 14.2 GB/s reading was cache-influenced — see note) | default, MTP off | **1.06 tok/s** · expert hit 23% · RSS 21.8 GB |
-| Apple M5 Max · macOS · 128 GB unified · 2 TB SSD · **Metal backend** ([#72](https://github.com/JustVugg/colibri/pull/72), [#87](https://github.com/JustVugg/colibri/issues/87)) | (macOS O_DIRECT figure unreliable — see note) | Metal on · `--ram 96` · 39.7 GB warm pin · MTP off | **1.83 tok/s** · expert hit 66% · warmed 1.11 → 1.83 over the run |
-| 〃 · 46.9 GB pin (2.94M-selection history) · `--ram 110`, 1024-token run ([#103](https://github.com/JustVugg/colibri/issues/103)) | 〃 | Metal on (experts + attention) · MTP off | **2.06 tok/s** · hit 72.5% · coherent output · fastest datapoint yet (still on the pre-rebase Metal branch) |
-| Mac Mini M4 Pro · macOS · **48 GB** unified · **Metal backend** ([#107](https://github.com/JustVugg/colibri/issues/107)) | 6.59 GB/s F_NOCACHE (fresh shard) | Metal on · `--ram 38` | **0.30 tok/s** (vs 0.18 CPU-only) — entry Apple Silicon on a third the RAM beats the 32-core 9950X row |
-| Epyc 9654 ES · Linux · 4x16GB DDR5-4800-rdimm · Samsung PCIe Gen3 x4 NVME SSD | — | `MTP=1 DIRECT=1` | 0.31 tok/s · expert hit 35% · RSS 21.52 GB |
-| Ryzen AI 9 HX 370 (Framework 13) · Arch Linux · 128 GB · WD SN850X, BTRFS zstd ([#12](https://github.com/JustVugg/colibri/issues/12)) | — | int8 MTP head · `--cap 32` · 46.7 GB auto-learned PIN | **0.37 tok/s** · expert hit 66% · MTP acceptance 52% (2.59 tok/fw) · RSS 105 GB |
-| Ryzen 9 9950X (32 threads) · Linux · 123 GB · Crucial P3 QLC Gen3 ([#31](https://github.com/JustVugg/colibri/issues/31)) | 1.51 GB/s buffered | default, 2 runs from cold | 0.10 tok/s · hit 53% · profile 66% disk |
-| 〃 same machine, model moved to a Samsung 9100 PRO PCIe 5.0 ([#31](https://github.com/JustVugg/colibri/issues/31)) | **8.81 GB/s** O_DIRECT | 〃 (usage history retained) | **0.28 tok/s** · hit 57% · profile flips: 32% disk / **57% matmul** |
-| Ryzen AI Max+ 395 (Framework Desktop) · Ubuntu · 128 GB LPDDR5x · Intel Optane 905p PCIe 3.0 ([#39](https://github.com/JustVugg/colibri/issues/39)) | 3.27 GB/s buffered | int8 MTP head · fresh history (pure LRU, auto-raised cap 65) | 0.16 tok/s · hit 57% · profile 49% disk / 47% matmul |
-| 〃 five runs later — learned pin 47.6 GB ([#39](https://github.com/JustVugg/colibri/issues/39)) | 〃 | `--temp 0.7 --topp 0.7` | **0.40 tok/s** · hit 71% · fastest non-Apple datapoint |
-| Ryzen 7 9800X3D (16T) · WSL2 · 70 GB RAM · Samsung 9100 PRO PCIe 5.0 · RTX 5090 ([#101](https://github.com/JustVugg/colibri/issues/101)) | **10.51 GB/s** O_DIRECT | MTP off · learned pin 24 GB · hit 54% · OMP hot-team on | **0.41 tok/s** · disk-bound (36.5 s disk vs 24.0 s matmul) · **CUDA expert tier ≈ 0%** (AVX-512 CPU matches the 5090) · `--topp 0.7` → **0.52 tok/s** |
-| EPYC 7443 (24C/48T, Zen3 AVX2) · Linux · **430 GB RAM** · NVMe RAID-Z1 via TrueNAS VM ([#104](https://github.com/JustVugg/colibri/issues/104)) | ~1 GB/s (VM overhead) | 77.5 GB pin · cap auto-raised to 194/layer · MTP off | **1.00 tok/s** · **hit 98%** · disk eliminated → **RAM-bandwidth + matmul bound** (no AVX-512/VNNI on Zen3) |
-| Intel i5-12600K (10C/16T, AVX2) · **native Windows 11, no WSL** · 32 GB · MinGW GCC 16.1 ([#113](https://github.com/JustVugg/colibri/issues/113)) | buffered (no O_DIRECT on MinGW) | int8 MTP head · cold, small-RAM (cap ~2/layer) | **0.08 tok/s** · hit 3.7% · **MTP 57% acceptance** — first native-Windows datapoint, port validated |
-| Ryzen 9 9950X3D2 (16C/32T, avx512-vnni) · native Linux · 121 GB · Samsung 9100 PRO **PCIe Gen5** · RTX 5090 (28 GB expert tier, 1475 pinned) ([#120](https://github.com/JustVugg/colibri/issues/120)) | **11.48 GB/s** O_DIRECT | `MTP=0 DIRECT=1 PIPE_WORKERS=16 PREFETCH=1` | **1.23 tok/s** · MTP-off wins disk-bound · fastest x86 datapoint yet |
-| Ryzen AI Max+ 395 (Strix Halo, 16C/32T Zen5, avx512-vnni) · Arch Linux · 128 GB unified LPDDR5x · SK hynix P41 PCIe 4.0 ([#124](https://github.com/JustVugg/colibri/issues/124)) | — | `DIRECT=1 PIPE=1 --topp 0.7` · auto-pin | 0.06 cold → **1.10 tok/s** sustained · first Strix Halo / gfx1151 datapoint (unified memory: no discrete VRAM tier) |
-| Intel Core Ultra 9 185H (16C/22T, avx-vnni) · **native Windows 11, no WSL** · 32 GB · Crucial P3 QLC NTFS · RTX 5070 Ti (unused) ([#128](https://github.com/JustVugg/colibri/issues/128)) | — | int8 MTP head · **with [#131](https://github.com/JustVugg/colibri/pull/131) (pipe + RAM fixes), warm cache, no GPU** | 0.03 cold → **0.5 tok/s** warm (~7-prompt warmup) · cache-warming on native Windows once the portability blockers are fixed — stock main hung on the `\r\n` READY sentinel before #131 |
-| Dell Pro Max GB10 (DGX Spark: Grace 10×X925 + 10×A725, **aarch64 i8mm/sve2**) · Linux · 121 GB unified LPDDR5x · Dell OEM 4 TB NVMe · GB10 sm_121 ([#136](https://github.com/JustVugg/colibri/issues/136)) | **5.58 GB/s** O_DIRECT (NVIDIA-OEM unit in #76 was 10.74 — same platform, different SSD) | int8 MTP head · warm cache | 0.21 cold → **0.50 tok/s** warm · hit 83% · MTP 73% (3.20 tok/fw) · **matmul-bound** (matmul 130 s vs disk 58 s) — unified memory, CUDA placement tier neutral; the lever here is an i8mm compute kernel, not placement |
+| machine                                                                                                                                                                                                    | disk (iobench, 19 MB × 64, 8 threads)                                                    | config                                                                                                                       | measured                                                                                                                                                                                                                |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Intel Core Ultra 7 270K Plus (24 threads) · WSL2 · 24 GB RAM · NVMe VHDX ([#2](https://github.com/JustVugg/colibri/issues/2))                                                                              | 1.96 GB/s buffered · 2.74 GB/s O_DIRECT                                                  | default                                                                                                                      | 0.07 tok/s · expert hit 3–4% · RSS 14.1 GB                                                                                                                                                                              |
+| 〃                                                                                                                                                                                                          | 〃                                                                                        | `--topp 0.7`                                                                                                                 | **0.11 tok/s** · expert hit 11% · RSS 14.7 GB                                                                                                                                                                           |
+| Apple M5 Max (18 cores) · macOS · 128 GB unified · internal SSD ([#4](https://github.com/JustVugg/colibri/issues/4), [#5](https://github.com/JustVugg/colibri/issues/5))                                   | ~4 GB/s cold (the 14.2 GB/s reading was cache-influenced — see note)                     | default, MTP off                                                                                                             | **1.06 tok/s** · expert hit 23% · RSS 21.8 GB                                                                                                                                                                           |
+| Apple M5 Max · macOS · 128 GB unified · 2 TB SSD · **Metal backend** ([#72](https://github.com/JustVugg/colibri/pull/72), [#87](https://github.com/JustVugg/colibri/issues/87))                            | (macOS O_DIRECT figure unreliable — see note)                                            | Metal on · `--ram 96` · 39.7 GB warm pin · MTP off                                                                           | **1.83 tok/s** · expert hit 66% · warmed 1.11 → 1.83 over the run                                                                                                                                                       |
+| 〃 · 46.9 GB pin (2.94M-selection history) · `--ram 110`, 1024-token run ([#103](https://github.com/JustVugg/colibri/issues/103))                                                                           | 〃                                                                                        | Metal on (experts + attention) · MTP off                                                                                     | **2.06 tok/s** · hit 72.5% · coherent output · fastest datapoint yet (still on the pre-rebase Metal branch)                                                                                                             |
+| Mac Mini M4 Pro · macOS · **48 GB** unified · **Metal backend** ([#107](https://github.com/JustVugg/colibri/issues/107))                                                                                   | 6.59 GB/s F_NOCACHE (fresh shard)                                                        | Metal on · `--ram 38`                                                                                                        | **0.30 tok/s** (vs 0.18 CPU-only) — entry Apple Silicon on a third the RAM beats the 32-core 9950X row                                                                                                                  |
+| Epyc 9654 ES · Linux · 4x16GB DDR5-4800-rdimm · Samsung PCIe Gen3 x4 NVME SSD                                                                                                                              | —                                                                                        | `MTP=1 DIRECT=1`                                                                                                             | 0.31 tok/s · expert hit 35% · RSS 21.52 GB                                                                                                                                                                              |
+| Ryzen AI 9 HX 370 (Framework 13) · Arch Linux · 128 GB · WD SN850X, BTRFS zstd ([#12](https://github.com/JustVugg/colibri/issues/12))                                                                      | —                                                                                        | int8 MTP head · `--cap 32` · 46.7 GB auto-learned PIN                                                                        | **0.37 tok/s** · expert hit 66% · MTP acceptance 52% (2.59 tok/fw) · RSS 105 GB                                                                                                                                         |
+| Ryzen 9 9950X (32 threads) · Linux · 123 GB · Crucial P3 QLC Gen3 ([#31](https://github.com/JustVugg/colibri/issues/31))                                                                                   | 1.51 GB/s buffered                                                                       | default, 2 runs from cold                                                                                                    | 0.10 tok/s · hit 53% · profile 66% disk                                                                                                                                                                                 |
+| 〃 same machine, model moved to a Samsung 9100 PRO PCIe 5.0 ([#31](https://github.com/JustVugg/colibri/issues/31))                                                                                          | **8.81 GB/s** O_DIRECT                                                                   | 〃 (usage history retained)                                                                                                   | **0.28 tok/s** · hit 57% · profile flips: 32% disk / **57% matmul**                                                                                                                                                     |
+| Ryzen AI Max+ 395 (Framework Desktop) · Ubuntu · 128 GB LPDDR5x · Intel Optane 905p PCIe 3.0 ([#39](https://github.com/JustVugg/colibri/issues/39))                                                        | 3.27 GB/s buffered                                                                       | int8 MTP head · fresh history (pure LRU, auto-raised cap 65)                                                                 | 0.16 tok/s · hit 57% · profile 49% disk / 47% matmul                                                                                                                                                                    |
+| 〃 five runs later — learned pin 47.6 GB ([#39](https://github.com/JustVugg/colibri/issues/39))                                                                                                             | 〃                                                                                        | `--temp 0.7 --topp 0.7`                                                                                                      | **0.40 tok/s** · hit 71% · fastest non-Apple datapoint                                                                                                                                                                  |
+| Ryzen 7 9800X3D (16T) · WSL2 · 70 GB RAM · Samsung 9100 PRO PCIe 5.0 · RTX 5090 ([#101](https://github.com/JustVugg/colibri/issues/101))                                                                   | **10.51 GB/s** O_DIRECT                                                                  | MTP off · learned pin 24 GB · hit 54% · OMP hot-team on                                                                      | **0.41 tok/s** · disk-bound (36.5 s disk vs 24.0 s matmul) · **CUDA expert tier ≈ 0%** (AVX-512 CPU matches the 5090) · `--topp 0.7` → **0.52 tok/s**                                                                   |
+| EPYC 7443 (24C/48T, Zen3 AVX2) · Linux · **430 GB RAM** · NVMe RAID-Z1 via TrueNAS VM ([#104](https://github.com/JustVugg/colibri/issues/104))                                                             | ~1 GB/s (VM overhead)                                                                    | 77.5 GB pin · cap auto-raised to 194/layer · MTP off                                                                         | **1.00 tok/s** · **hit 98%** · disk eliminated → **RAM-bandwidth + matmul bound** (no AVX-512/VNNI on Zen3)                                                                                                             |
+| Intel i5-12600K (10C/16T, AVX2) · **native Windows 11, no WSL** · 32 GB · MinGW GCC 16.1 ([#113](https://github.com/JustVugg/colibri/issues/113))                                                          | buffered (no O_DIRECT on MinGW)                                                          | int8 MTP head · cold, small-RAM (cap ~2/layer)                                                                               | **0.08 tok/s** · hit 3.7% · **MTP 57% acceptance** — first native-Windows datapoint, port validated                                                                                                                     |
+| Ryzen 9 9950X3D2 (16C/32T, avx512-vnni) · native Linux · 121 GB · Samsung 9100 PRO **PCIe Gen5** · RTX 5090 (28 GB expert tier, 1475 pinned) ([#120](https://github.com/JustVugg/colibri/issues/120))      | **11.48 GB/s** O_DIRECT                                                                  | `MTP=0 DIRECT=1 PIPE_WORKERS=16 PREFETCH=1`                                                                                  | **1.23 tok/s** · MTP-off wins disk-bound · fastest x86 datapoint yet                                                                                                                                                    |
+| Ryzen AI Max+ 395 (Strix Halo, 16C/32T Zen5, avx512-vnni) · Arch Linux · 128 GB unified LPDDR5x · SK hynix P41 PCIe 4.0 ([#124](https://github.com/JustVugg/colibri/issues/124))                           | —                                                                                        | `DIRECT=1 PIPE=1 --topp 0.7` · auto-pin                                                                                      | 0.06 cold → **1.10 tok/s** sustained · first Strix Halo / gfx1151 datapoint (unified memory: no discrete VRAM tier)                                                                                                     |
+| Intel Core Ultra 9 185H (16C/22T, avx-vnni) · **native Windows 11, no WSL** · 32 GB · Crucial P3 QLC NTFS · RTX 5070 Ti (unused) ([#128](https://github.com/JustVugg/colibri/issues/128))                  | —                                                                                        | int8 MTP head · **with ****[#131](https://github.com/JustVugg/colibri/pull/131)**** (pipe + RAM fixes), warm cache, no GPU** | 0.03 cold → **0.5 tok/s** warm (~7-prompt warmup) · cache-warming on native Windows once the portability blockers are fixed — stock main hung on the `\r\n` READY sentinel before #131                                  |
+| Dell Pro Max GB10 (DGX Spark: Grace 10×X925 + 10×A725, **aarch64 i8mm/sve2**) · Linux · 121 GB unified LPDDR5x · Dell OEM 4 TB NVMe · GB10 sm_121 ([#136](https://github.com/JustVugg/colibri/issues/136)) | **5.58 GB/s** O_DIRECT (NVIDIA-OEM unit in #76 was 10.74 — same platform, different SSD) | int8 MTP head · warm cache                                                                                                   | 0.21 cold → **0.50 tok/s** warm · hit 83% · MTP 73% (3.20 tok/fw) · **matmul-bound** (matmul 130 s vs disk 58 s) — unified memory, CUDA placement tier neutral; the lever here is an i8mm compute kernel, not placement |
 
 Takeaways: with 24 GB of RAM the engine auto-caps the expert cache to 2 slots/layer, so decode stays cold even on a disk 2–2.7× faster than the dev box — **on small-RAM machines the RAM cap, not the disk, is the binding constraint**, exactly as the table above predicts; `--topp 0.7` alone bought a clean 1.6× end-to-end speedup. The M5 Max datapoint lands right on the table's second row: **~1 tok/s of a 744B model on a laptop SSD** — and its 14 GB/s disk shifts the bottleneck back to RAM budget and kernels. The Framework 13 rows are the cache thesis proven end-to-end on one machine: 0.29 → 0.37 tok/s (hit 28% → 66%, speculation finally engaging at 52% acceptance) just by giving the cache its RAM — int8 MTP head + a bigger cap + the learned pin. The cap part is now automatic (cap auto-raise, 2026-07-10). The 9950X pair is the cleanest bottleneck experiment yet — same machine, same history, only the disk swapped: ×5.8 disk bandwidth bought ×2.9 tokens, and the profile **flipped from 66% disk to 57% matmul**. But the crossover depends on the CPU kernel: the 9800X3D row ([#101](https://github.com/JustVugg/colibri/issues/101)) shows that with the OMP hot-team tuning on, the AVX-512 CPU matmul is fast enough that even a **10 GB/s NVMe stays disk-bound** — and there the **CUDA expert tier buys ≈ 0%**, because the CPU already matches the 5090 on expert matmul. The GPU tier earns its VRAM only when the CPU is the weak link, not by default. (Honest correction from #101: an earlier version of that report ran with the OMP tuning off, which manufactured a false matmul-bound crossover and a false +14% for CUDA — neither survived a clean re-run.)
 
@@ -620,6 +636,7 @@ Takeaways: with 24 GB of RAM the engine auto-caps the expert cache to 2 slots/la
 **First measurement is in** ([#108](https://github.com/JustVugg/colibri/issues/108), thanks dnnspaul): the int4 container scored **62.5% mean acc_norm** on hellaswag/arc/mmlu (0-shot log-likelihood, n=40) — below the 85–95% published for full-precision GLM-5.2, but **the gap is not yet attributable to quantization.** Two confounds sit in the way: (1) 0-shot log-likelihood MC scoring badly underserves a *reasoning* model like GLM-5.2 (it never gets to think), so a large gap is expected even at fp16; (2) n=40 is ±14pp. The **decisive experiment** is the OLMoE fp16-vs-int4 A/B under this same harness (small enough to run both precisions) — that delta *is* the quantization cost with the scoring protocol cancelled out. Until it's run, 62.5% is a datapoint, not a verdict.
 
 The code is here and ready; one command runs it end to end (it auto-downloads the datasets on first use):
+
 
 ```bash
 cd c
@@ -636,12 +653,13 @@ It prints per-task accuracy (log-likelihood scoring, EleutherAI-harness style). 
 colibrì is a one-person project, written and tested entirely on a 12-core laptop with 25 GB of RAM — the numbers above are the ceiling of what I can measure at home. If this project is useful or interesting to you and you'd like to support its development (better test hardware translates *directly* into a faster engine for everyone: real NVMe scaling data, bigger pinned caches, int2/int3 quality sweeps on real benchmarks), you can:
 
 - ⭐ star the repo and share it;
-- 🐛 open issues with benchmark numbers from your hardware;
+- 🐛 open issues with benchmark numbers from your hardwar  e;
 - 💬 reach out via GitHub issues if you'd like to sponsor development or donate hardware.
 
 Every contribution, from a datapoint to a disk, moves the ceiling.
 
 ## Repo layout
+
 
 ```
 Makefile                  root build/check entry point
