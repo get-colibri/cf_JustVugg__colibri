@@ -38,4 +38,4 @@ make -C c cuda-test CUDA_ARCH=native
 Benchmark reports should include the commit, exact commands, hardware and
 storage details, warm-up policy, run count, and median throughput.
 
-```
+&#8203;
